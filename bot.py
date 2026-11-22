@@ -207,8 +207,12 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_upload(client: Client, message: Message, settings: Settings) -> None:
+    if message.from_user is None:
+        LOG.info("Ignoring media message %s without a user sender", message.id)
+        return
+
     if settings.owner_id is not None:
-        if message.from_user is None or message.from_user.id != settings.owner_id:
+        if message.from_user.id != settings.owner_id:
             await message.reply_text("No tienes permiso para generar enlaces.")
             return
 
@@ -250,7 +254,7 @@ async def main() -> None:
     client.add_handler(
         MessageHandler(
             on_upload,
-            filters.private & (filters.video | filters.document),
+            (filters.private | filters.group) & (filters.video | filters.document),
         )
     )
 
