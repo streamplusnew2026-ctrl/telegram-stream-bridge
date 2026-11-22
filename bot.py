@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import mimetypes
 import os
@@ -9,6 +10,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiohttp import web
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.errors import RPCError
 from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
@@ -216,8 +218,11 @@ async def handle_upload(client: Client, message: Message, settings: Settings) ->
             await message.reply_text("No tienes permiso para generar enlaces.")
             return
 
-    if get_file(message) is None:
+    file_info = get_file(message)
+    if file_info is None:
         return
+    media, _, _ = file_info
+    filename = getattr(media, "file_name", None) or "Archivo sin nombre"
 
     try:
         stored_message = await message.copy(settings.bin_channel)
@@ -229,9 +234,10 @@ async def handle_upload(client: Client, message: Message, settings: Settings) ->
     stream_url = f"{settings.public_url}/stream/{stored_message.id}"
     download_url = f"{settings.public_url}/dl/{stored_message.id}"
     await message.reply_text(
-        f"Archivo guardado.\n"
-        f"Streaming: {stream_url}\n"
-        f"Descarga: {download_url}"
+        f"🎬 <b>{html.escape(filename)}</b>\n\n"
+        f"▶️ <b>Streaming:</b> {html.escape(stream_url)}\n"
+        f"⬇️ <b>Descarga:</b> {html.escape(download_url)}",
+        parse_mode=ParseMode.HTML,
     )
 
 
