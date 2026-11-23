@@ -23,9 +23,14 @@ publicos para streaming con soporte para HTTP Range y descarga directa.
 | `RENDER_EXTERNAL_URL` | Automatica | URL publica que Render proporciona para el Web Service |
 | `URL` | Opcional | URL publica manual; si se define, tiene prioridad sobre `RENDER_EXTERNAL_URL` |
 | `OWNER_ID` | Opcional | Si se define, solo este ID de usuario puede generar enlaces |
+| `WORKER_MODE` | Opcional | Con valor `true`, desactiva el manejador de mensajes y deja el proceso atendiendo streaming |
 
 El servidor tambien acepta `FQDN` o `SPACE_HOST` como alternativas a la URL publica.
 El endpoint `/` responde `{"status":"running"}` para las comprobaciones de salud.
+Para nodos adicionales de streaming, configura `WORKER_MODE=true`; el cliente de
+Telegram y las rutas HTTP seguiran activos, pero los archivos enviados no generaran
+enlaces desde ese nodo. De forma predeterminada (`false`), el proceso conserva el
+comportamiento completo del bot.
 
 ## Uso
 

@@ -294,16 +294,20 @@ async def main() -> None:
         api_hash=settings.api_hash,
         bot_token=settings.bot_token,
     )
+    worker_mode = os.environ.get("WORKER_MODE", "false").lower() == "true"
 
-    async def on_upload(bot: Client, message) -> None:
-        await handle_upload(bot, message, settings)
+    if worker_mode:
+        LOG.info("WORKER_MODE activo: manejadores de mensajes deshabilitados")
+    else:
+        async def on_upload(bot: Client, message) -> None:
+            await handle_upload(bot, message, settings)
 
-    client.add_handler(
-        MessageHandler(
-            on_upload,
-            (filters.private | filters.group) & (filters.video | filters.document),
+        client.add_handler(
+            MessageHandler(
+                on_upload,
+                (filters.private | filters.group) & (filters.video | filters.document),
+            )
         )
-    )
 
     await client.start()
     web_app = web.Application()
