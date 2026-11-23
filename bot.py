@@ -9,15 +9,10 @@ from dataclasses import dataclass
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiohttp import web
-from pyrogram import Client, filters
+from pyrogram import Client, filters, raw, utils
 from pyrogram.enums import ParseMode
 from pyrogram.errors import RPCError
-from pyrogram.handlers import CallbackQueryHandler, MessageHandler
-from pyrogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from pyrogram.handlers import MessageHandler
 
 CHUNK_SIZE = 1024 * 1024
 RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)$")
@@ -242,44 +237,48 @@ async def handle_upload(client: Client, message, settings: Settings) -> None:
         f"▶️ <b>Streaming:</b> <code>{html.escape(stream_url)}</code>\n"
         f"⬇️ <b>Descarga:</b> <code>{html.escape(download_url)}</code>"
     )
-    reply_markup = InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton(
-                "📋 Link Streaming",
-                callback_data=f"copy_stream:{stored_message.id}",
-            ),
-            InlineKeyboardButton(
-                "📋 Link Descarga",
-                callback_data=f"copy_dl:{stored_message.id}",
-            ),
-        ]]
-    )
-    await message.reply_text(
-        response_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup,
-    )
-
-
-async def handle_copy_link(
-    callback_query: CallbackQuery,
-    settings: Settings,
-) -> None:
-    data = callback_query.data or ""
-    match = re.fullmatch(r"(copy_stream|copy_dl):([1-9]\d*)", data)
-    if match is None:
-        await callback_query.answer("Enlace no válido")
-        return
-
-    action, message_id = match.groups()
-    path = "stream" if action == "copy_stream" else "dl"
-    link = f"{settings.public_url}/{path}/{message_id}"
-    await callback_query.answer("Enlace enviado abajo 👇")
-
-    if callback_query.message is not None:
-        await callback_query.message.reply_text(
-            f"<code>{html.escape(link)}</code>",
+    try:
+        reply_markup = raw.types.ReplyInlineMarkup(
+            rows=[
+                raw.types.KeyboardButtonRow(
+                    buttons=[
+                        raw.types.KeyboardButtonCopy(
+                            text="📋 Copiar Streaming",
+                            copy_text=stream_url,
+                        ),
+                        raw.types.KeyboardButtonCopy(
+                            text="📋 Copiar Descarga",
+                            copy_text=download_url,
+                        ),
+                    ]
+                )
+            ]
+        )
+        parsed_text = await client.parser.parse(response_text, ParseMode.HTML)
+        await client.invoke(
+            raw.functions.messages.SendMessage(
+                peer=await client.resolve_peer(message.chat.id),
+                message=parsed_text["message"],
+                random_id=client.rnd_id(),
+                reply_to=await utils.get_reply_to(
+                    client=client,
+                    chat_id=message.chat.id,
+                    reply_to_message_id=message.id,
+                    message_thread_id=message.message_thread_id,
+                ),
+                reply_markup=reply_markup,
+                entities=parsed_text["entities"],
+            )
+        )
+    except Exception:
+        LOG.exception(
+            "No se pudo enviar el mensaje con botones nativos; usando send_message"
+        )
+        await client.send_message(
+            chat_id=message.chat.id,
+            text=response_text,
             parse_mode=ParseMode.HTML,
+            reply_to_message_id=message.id,
         )
 
 
@@ -299,19 +298,10 @@ async def main() -> None:
     async def on_upload(bot: Client, message) -> None:
         await handle_upload(bot, message, settings)
 
-    async def on_copy_link(bot: Client, callback_query: CallbackQuery) -> None:
-        await handle_copy_link(callback_query, settings)
-
     client.add_handler(
         MessageHandler(
             on_upload,
             (filters.private | filters.group) & (filters.video | filters.document),
-        )
-    )
-    client.add_handler(
-        CallbackQueryHandler(
-            on_copy_link,
-            filters.regex(r"^(copy_stream|copy_dl):[1-9]\d*$"),
         )
     )
 
