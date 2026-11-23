@@ -13,7 +13,12 @@ from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import RPCError
 from pyrogram.handlers import MessageHandler
-from pyrogram.types import Message
+from pyrogram.types import (
+    CopyTextButton,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 CHUNK_SIZE = 1024 * 1024
 RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)$")
@@ -233,12 +238,35 @@ async def handle_upload(client: Client, message: Message, settings: Settings) ->
 
     stream_url = f"{settings.public_url}/stream/{stored_message.id}"
     download_url = f"{settings.public_url}/dl/{stored_message.id}"
-    await message.reply_text(
+    response_text = (
         f"🎬 <b>{html.escape(filename)}</b>\n\n"
-        f"▶️ <b>Streaming:</b> {html.escape(stream_url)}\n"
-        f"⬇️ <b>Descarga:</b> {html.escape(download_url)}",
-        parse_mode=ParseMode.HTML,
+        f"▶️ <b>Streaming:</b> <code>{html.escape(stream_url)}</code>\n"
+        f"⬇️ <b>Descarga:</b> <code>{html.escape(download_url)}</code>"
     )
+    try:
+        reply_markup = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton(
+                    "📋 Copiar Streaming",
+                    copy_text=CopyTextButton(text=stream_url),
+                ),
+                InlineKeyboardButton(
+                    "📋 Copiar Descarga",
+                    copy_text=CopyTextButton(text=download_url),
+                ),
+            ]]
+        )
+        await message.reply_text(
+            response_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        LOG.exception("No se pudieron enviar los botones de copia; enviando enlaces sin botones")
+        await message.reply_text(
+            response_text,
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def main() -> None:
