@@ -11,7 +11,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from aiohttp import web
 from pyrogram import Client, filters, raw, utils
 from pyrogram.enums import ChatType, ParseMode
-from pyrogram.errors import RPCError
+from pyrogram.errors import RPCError, RpcCallFail
 from pyrogram.handlers import MessageHandler
 
 CHUNK_SIZE = 1024 * 1024
@@ -337,7 +337,6 @@ async def main() -> None:
             )
         )
 
-    await client.start()
     web_app = web.Application()
     web_app["telegram_client"] = client
     web_app["bin_channel"] = settings.bin_channel
@@ -346,11 +345,31 @@ async def main() -> None:
     web_app.router.add_get("/dl/{message_id}", serve_file, name="download")
 
     runner = web.AppRunner(web_app)
+    telegram_started = False
     try:
         await runner.setup()
         site = web.TCPSite(runner, host="0.0.0.0", port=settings.port)
         await site.start()
         LOG.info("Bot y servidor HTTP activos en el puerto %s", settings.port)
+
+        for attempt in range(1, 11):
+            try:
+                await client.start()
+                telegram_started = True
+                LOG.info("Cliente de Telegram iniciado en el intento %s", attempt)
+                break
+            except RpcCallFail as exc:
+                if attempt == 10:
+                    LOG.exception(
+                        "No se pudo iniciar Telegram despues de 10 intentos"
+                    )
+                    raise
+                LOG.warning(
+                    "RPC_CALL_FAIL al iniciar Telegram (intento %s/10): %s",
+                    attempt,
+                    exc,
+                )
+                await asyncio.sleep(10)
 
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -359,7 +378,8 @@ async def main() -> None:
         await stop_event.wait()
     finally:
         await runner.cleanup()
-        await client.stop()
+        if telegram_started:
+            await client.stop()
 
 
 if __name__ == "__main__":
