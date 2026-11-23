@@ -12,12 +12,11 @@ from aiohttp import web
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import RPCError
-from pyrogram.handlers import MessageHandler
+from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import (
-    CopyTextButton,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    Message,
 )
 
 CHUNK_SIZE = 1024 * 1024
@@ -79,7 +78,7 @@ def normalize_public_url(value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
-def get_file(message: Message):
+def get_file(message):
     media = message.video or message.document
     if media is None:
         return None
@@ -213,7 +212,7 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
     return response
 
 
-async def handle_upload(client: Client, message: Message, settings: Settings) -> None:
+async def handle_upload(client: Client, message, settings: Settings) -> None:
     if message.from_user is None:
         LOG.info("Ignoring media message %s without a user sender", message.id)
         return
@@ -243,28 +242,43 @@ async def handle_upload(client: Client, message: Message, settings: Settings) ->
         f"▶️ <b>Streaming:</b> <code>{html.escape(stream_url)}</code>\n"
         f"⬇️ <b>Descarga:</b> <code>{html.escape(download_url)}</code>"
     )
-    try:
-        reply_markup = InlineKeyboardMarkup(
-            [[
-                InlineKeyboardButton(
-                    "📋 Copiar Streaming",
-                    copy_text=CopyTextButton(text=stream_url),
-                ),
-                InlineKeyboardButton(
-                    "📋 Copiar Descarga",
-                    copy_text=CopyTextButton(text=download_url),
-                ),
-            ]]
-        )
-        await message.reply_text(
-            response_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup,
-        )
-    except Exception:
-        LOG.exception("No se pudieron enviar los botones de copia; enviando enlaces sin botones")
-        await message.reply_text(
-            response_text,
+    reply_markup = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(
+                "📋 Link Streaming",
+                callback_data=f"copy_stream:{stored_message.id}",
+            ),
+            InlineKeyboardButton(
+                "📋 Link Descarga",
+                callback_data=f"copy_dl:{stored_message.id}",
+            ),
+        ]]
+    )
+    await message.reply_text(
+        response_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup,
+    )
+
+
+async def handle_copy_link(
+    callback_query: CallbackQuery,
+    settings: Settings,
+) -> None:
+    data = callback_query.data or ""
+    match = re.fullmatch(r"(copy_stream|copy_dl):([1-9]\d*)", data)
+    if match is None:
+        await callback_query.answer("Enlace no válido")
+        return
+
+    action, message_id = match.groups()
+    path = "stream" if action == "copy_stream" else "dl"
+    link = f"{settings.public_url}/{path}/{message_id}"
+    await callback_query.answer("Enlace enviado abajo 👇")
+
+    if callback_query.message is not None:
+        await callback_query.message.reply_text(
+            f"<code>{html.escape(link)}</code>",
             parse_mode=ParseMode.HTML,
         )
 
@@ -282,13 +296,22 @@ async def main() -> None:
         bot_token=settings.bot_token,
     )
 
-    async def on_upload(bot: Client, message: Message) -> None:
+    async def on_upload(bot: Client, message) -> None:
         await handle_upload(bot, message, settings)
+
+    async def on_copy_link(bot: Client, callback_query: CallbackQuery) -> None:
+        await handle_copy_link(callback_query, settings)
 
     client.add_handler(
         MessageHandler(
             on_upload,
             (filters.private | filters.group) & (filters.video | filters.document),
+        )
+    )
+    client.add_handler(
+        CallbackQueryHandler(
+            on_copy_link,
+            filters.regex(r"^(copy_stream|copy_dl):[1-9]\d*$"),
         )
     )
 
