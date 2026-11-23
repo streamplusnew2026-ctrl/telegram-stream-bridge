@@ -10,7 +10,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiohttp import web
 from pyrogram import Client, filters, raw, utils
-from pyrogram.enums import ParseMode
+from pyrogram.enums import ChatType, ParseMode
 from pyrogram.errors import RPCError
 from pyrogram.handlers import MessageHandler
 
@@ -28,6 +28,7 @@ class Settings:
     port: int
     public_url: str
     owner_id: int | None
+    allowed_group_id: int | None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -49,6 +50,7 @@ class Settings:
         public_url = normalize_public_url(raw_url)
 
         owner_value = os.environ.get("OWNER_ID")
+        allowed_group_value = os.environ.get("ALLOWED_GROUP_ID")
         try:
             return cls(
                 api_id=int(os.environ["API_ID"]),
@@ -58,9 +60,14 @@ class Settings:
                 port=int(os.environ.get("PORT", 7860)),
                 public_url=public_url,
                 owner_id=int(owner_value) if owner_value else None,
+                allowed_group_id=(
+                    int(allowed_group_value) if allowed_group_value else None
+                ),
             )
         except ValueError as exc:
-            raise RuntimeError("API_ID, BIN_CHANNEL, PORT y OWNER_ID deben ser numeros") from exc
+            raise RuntimeError(
+                "API_ID, BIN_CHANNEL, PORT, OWNER_ID y ALLOWED_GROUP_ID deben ser numeros"
+            ) from exc
 
 
 def normalize_public_url(value: str) -> str:
@@ -207,15 +214,32 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
     return response
 
 
-async def handle_upload(client: Client, message, settings: Settings) -> None:
-    if message.from_user is None:
-        LOG.info("Ignoring media message %s without a user sender", message.id)
-        return
+def is_authorized(message, settings: Settings) -> bool:
+    chat_type = message.chat.type
 
-    if settings.owner_id is not None:
-        if message.from_user.id != settings.owner_id:
-            await message.reply_text("No tienes permiso para generar enlaces.")
-            return
+    if chat_type == ChatType.PRIVATE:
+        return (
+            message.from_user is not None
+            and (settings.owner_id is None or message.from_user.id == settings.owner_id)
+        )
+
+    if chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return (
+            settings.allowed_group_id is not None
+            and message.chat.id == settings.allowed_group_id
+        )
+
+    return False
+
+
+async def handle_upload(client: Client, message, settings: Settings) -> None:
+    if not is_authorized(message, settings):
+        LOG.info(
+            "Ignoring media message %s from unauthorized chat %s",
+            message.id,
+            message.chat.id,
+        )
+        return
 
     file_info = get_file(message)
     if file_info is None:
@@ -227,7 +251,11 @@ async def handle_upload(client: Client, message, settings: Settings) -> None:
         stored_message = await message.copy(settings.bin_channel)
     except (RPCError, OSError, asyncio.TimeoutError):
         LOG.exception("No se pudo copiar el mensaje %s al canal BIN_CHANNEL", message.id)
-        await message.reply_text("No se pudo guardar el archivo. Revisa el canal y sus permisos.")
+        await client.send_message(
+            chat_id=message.chat.id,
+            text="No se pudo guardar el archivo. Revisa el canal y sus permisos.",
+            reply_to_message_id=message.id,
+        )
         return
 
     stream_url = f"{settings.public_url}/stream/{stored_message.id}"

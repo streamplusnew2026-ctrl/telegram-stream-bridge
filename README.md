@@ -24,6 +24,7 @@ publicos para streaming con soporte para HTTP Range y descarga directa.
 | `URL` | Opcional | URL publica manual; si se define, tiene prioridad sobre `RENDER_EXTERNAL_URL` |
 | `OWNER_ID` | Opcional | Si se define, solo este ID de usuario puede generar enlaces |
 | `WORKER_MODE` | Opcional | Con valor `true`, desactiva el manejador de mensajes y deja el proceso atendiendo streaming |
+| `ALLOWED_GROUP_ID` | Opcional | ID del unico grupo o supergrupo autorizado para generar enlaces |
 
 El servidor tambien acepta `FQDN` o `SPACE_HOST` como alternativas a la URL publica.
 El endpoint `/` responde `{"status":"running"}` para las comprobaciones de salud.
