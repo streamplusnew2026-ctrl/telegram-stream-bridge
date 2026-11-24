@@ -247,6 +247,12 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
     return response
 
 
+def normalize_chat_id(chat_id: int) -> int:
+    if chat_id < 0 and not str(chat_id).startswith("-100"):
+        return int(f"-100{abs(chat_id)}")
+    return chat_id
+
+
 def is_authorized(event, settings: Settings) -> bool:
     if event.is_private:
         return (
@@ -257,7 +263,8 @@ def is_authorized(event, settings: Settings) -> bool:
     if event.is_group:
         return (
             settings.allowed_group_id is not None
-            and event.chat_id == settings.allowed_group_id
+            and normalize_chat_id(event.chat_id)
+            == normalize_chat_id(settings.allowed_group_id)
         )
 
     return False
@@ -265,11 +272,7 @@ def is_authorized(event, settings: Settings) -> bool:
 
 async def handle_upload(client: TelegramClient, event, settings: Settings) -> None:
     if not is_authorized(event, settings):
-        LOG.info(
-            "Ignoring media message %s from unauthorized chat %s",
-            event.id,
-            event.chat_id,
-        )
+        LOG.info(f"Mensaje ignorado desde chat_id={event.chat_id}")
         return
 
     file_info = get_file(event.message)
@@ -379,6 +382,11 @@ async def main() -> None:
     if worker_mode:
         LOG.info("WORKER_MODE activo: manejadores de mensajes deshabilitados")
     else:
+
+        @client.on(events.NewMessage(pattern=r"^/chatid(?:@\w+)?$"))
+        async def on_chat_id(event) -> None:
+            if event.is_group:
+                await event.reply(str(event.chat_id))
 
         @client.on(events.NewMessage(incoming=True))
         async def on_upload(event) -> None:
