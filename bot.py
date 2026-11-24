@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -9,10 +10,9 @@ from dataclasses import dataclass
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiohttp import web
-from pyrogram import Client, filters, raw, utils
-from pyrogram.enums import ChatType, ParseMode
-from pyrogram.errors import RPCError, RpcCallFail
-from pyrogram.handlers import MessageHandler
+from telethon import Button, TelegramClient, events, types
+from telethon.errors import RpcCallFailError
+from telethon.sessions import StringSession
 
 CHUNK_SIZE = 1024 * 1024
 RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)$")
@@ -80,17 +80,21 @@ def normalize_public_url(value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
-def get_file(message):
-    media = message.video or message.document
-    if media is None:
+def get_file(message, fallback_name: str = "Archivo sin nombre"):
+    document = getattr(message, "document", None)
+    if document is None:
         return None
 
-    filename = getattr(media, "file_name", None)
-    if not filename:
-        extension = mimetypes.guess_extension(media.mime_type or "") or ""
-        filename = f"file_{message.id}{extension}"
-    mime_type = media.mime_type or mimetypes.guess_type(filename)[0]
-    return media, filename, mime_type or "application/octet-stream"
+    filename = next(
+        (
+            attribute.file_name
+            for attribute in document.attributes
+            if isinstance(attribute, types.DocumentAttributeFilename)
+        ),
+        fallback_name,
+    )
+    mime_type = document.mime_type or mimetypes.guess_type(filename)[0]
+    return document, filename, mime_type or "application/octet-stream"
 
 
 def content_disposition(kind: str, filename: str) -> str:
@@ -112,8 +116,7 @@ def parse_byte_range(value: str, size: int) -> tuple[int, int] | None:
         suffix_length = int(last)
         if suffix_length <= 0:
             return None
-        start = max(0, size - suffix_length)
-        return start, size - 1
+        return max(0, size - suffix_length), size - 1
 
     start = int(first)
     if start >= size:
@@ -129,26 +132,28 @@ async def health(_: web.Request) -> web.Response:
 
 
 async def serve_file(request: web.Request) -> web.StreamResponse:
-    client: Client = request.app["telegram_client"]
-    channel_id: int = request.app["bin_channel"]
+    client: TelegramClient = request.app["telegram_client"]
+    channel = request.app["bin_channel"]
     try:
         message_id = int(request.match_info["message_id"])
     except ValueError:
         raise web.HTTPNotFound()
 
     try:
-        message = await client.get_messages(channel_id, message_id)
-    except (RPCError, OSError, asyncio.TimeoutError) as exc:
+        message = await client.get_messages(channel, ids=message_id)
+    except Exception as exc:
         LOG.exception("No se pudo obtener el mensaje %s del canal", message_id)
-        raise web.HTTPBadGateway(text="No se pudo recuperar el archivo desde Telegram") from exc
+        raise web.HTTPBadGateway(
+            text="No se pudo recuperar el archivo desde Telegram"
+        ) from exc
     if not message or not message.id:
         raise web.HTTPNotFound(text="Archivo no encontrado")
 
-    file_info = get_file(message)
+    file_info = get_file(message, f"file_{message_id}")
     if file_info is None:
         raise web.HTTPNotFound(text="El mensaje no contiene un video o documento")
-    media, filename, mime_type = file_info
-    size = media.file_size
+    document, filename, mime_type = file_info
+    size = document.size
 
     headers = {
         "Accept-Ranges": "bytes",
@@ -173,32 +178,38 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
         status = 206
         headers["Content-Range"] = f"bytes {start}-{end}/{size}"
 
-    content_length = end - start + 1
+    content_length = max(0, end - start + 1)
     headers["Content-Length"] = str(content_length)
     response = web.StreamResponse(status=status, headers=headers)
     if request.method == "HEAD":
         return response
 
     await response.prepare(request)
+    if content_length == 0:
+        await response.write_eof()
+        return response
+
     sent = 0
-    offset = start % CHUNK_SIZE
     try:
-        async for chunk in client.stream_media(message, offset=start // CHUNK_SIZE):
-            if offset:
-                chunk = chunk[offset:]
-                offset = 0
+        async for chunk in client.iter_download(
+            message.media,
+            offset=start,
+            limit=math.ceil(content_length / CHUNK_SIZE),
+            chunk_size=CHUNK_SIZE,
+            file_size=size,
+        ):
             remaining = content_length - sent
             if len(chunk) > remaining:
                 chunk = chunk[:remaining]
             if chunk:
-                await response.write(chunk)
+                await response.write(bytes(chunk))
                 sent += len(chunk)
             if sent >= content_length:
                 break
     except (ConnectionResetError, BrokenPipeError):
         LOG.debug("El cliente cerro la conexion durante la descarga del mensaje %s", message_id)
         return response
-    except (RPCError, OSError, asyncio.TimeoutError):
+    except Exception:
         LOG.exception("Error transmitiendo el mensaje %s desde Telegram", message_id)
         return response
 
@@ -214,49 +225,52 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
     return response
 
 
-def is_authorized(message, settings: Settings) -> bool:
-    chat_type = message.chat.type
-
-    if chat_type == ChatType.PRIVATE:
+def is_authorized(event, settings: Settings) -> bool:
+    if event.is_private:
         return (
-            message.from_user is not None
-            and (settings.owner_id is None or message.from_user.id == settings.owner_id)
+            event.sender_id is not None
+            and (settings.owner_id is None or event.sender_id == settings.owner_id)
         )
 
-    if chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
+    if event.is_group:
         return (
             settings.allowed_group_id is not None
-            and message.chat.id == settings.allowed_group_id
+            and event.chat_id == settings.allowed_group_id
         )
 
     return False
 
 
-async def handle_upload(client: Client, message, settings: Settings) -> None:
-    if not is_authorized(message, settings):
+async def handle_upload(client: TelegramClient, event, settings: Settings) -> None:
+    if not is_authorized(event, settings):
         LOG.info(
             "Ignoring media message %s from unauthorized chat %s",
-            message.id,
-            message.chat.id,
+            event.id,
+            event.chat_id,
         )
         return
 
-    file_info = get_file(message)
+    file_info = get_file(event.message)
     if file_info is None:
         return
-    media, _, _ = file_info
-    filename = getattr(media, "file_name", None) or "Archivo sin nombre"
+    _, filename, _ = file_info
 
     try:
-        stored_message = await message.copy(settings.bin_channel)
-    except (RPCError, OSError, asyncio.TimeoutError):
-        LOG.exception("No se pudo copiar el mensaje %s al canal BIN_CHANNEL", message.id)
+        stored_message = await client.forward_messages(
+            settings.bin_channel,
+            event.message,
+        )
+    except Exception:
+        LOG.exception("No se pudo copiar el mensaje %s al canal BIN_CHANNEL", event.id)
         await client.send_message(
-            chat_id=message.chat.id,
-            text="No se pudo guardar el archivo. Revisa el canal y sus permisos.",
-            reply_to_message_id=message.id,
+            event.chat_id,
+            "No se pudo guardar el archivo. Revisa el canal y sus permisos.",
+            reply_to=event.id,
         )
         return
+
+    if isinstance(stored_message, (list, tuple)):
+        stored_message = stored_message[0]
 
     stream_url = f"{settings.public_url}/stream/{stored_message.id}"
     download_url = f"{settings.public_url}/dl/{stored_message.id}"
@@ -265,49 +279,40 @@ async def handle_upload(client: Client, message, settings: Settings) -> None:
         f"▶️ <b>Streaming:</b> <code>{html.escape(stream_url)}</code>\n"
         f"⬇️ <b>Descarga:</b> <code>{html.escape(download_url)}</code>"
     )
+
     try:
-        reply_markup = raw.types.ReplyInlineMarkup(
-            rows=[
-                raw.types.KeyboardButtonRow(
-                    buttons=[
-                        raw.types.KeyboardButtonCopy(
-                            text="📋 Copiar Streaming",
-                            copy_text=stream_url,
-                        ),
-                        raw.types.KeyboardButtonCopy(
-                            text="📋 Copiar Descarga",
-                            copy_text=download_url,
-                        ),
-                    ]
-                )
-            ]
+        buttons = [[
+            Button.copy("📋 Copiar Streaming", stream_url),
+            Button.copy("📋 Copiar Descarga", download_url),
+        ]]
+        await client.send_message(
+            event.chat_id,
+            response_text,
+            parse_mode="html",
+            buttons=buttons,
+            reply_to=event.id,
         )
-        parsed_text = await client.parser.parse(response_text, ParseMode.HTML)
-        await client.invoke(
-            raw.functions.messages.SendMessage(
-                peer=await client.resolve_peer(message.chat.id),
-                message=parsed_text["message"],
-                random_id=client.rnd_id(),
-                reply_to=await utils.get_reply_to(
-                    client=client,
-                    chat_id=message.chat.id,
-                    reply_to_message_id=message.id,
-                    message_thread_id=message.message_thread_id,
-                ),
-                reply_markup=reply_markup,
-                entities=parsed_text["entities"],
-            )
-        )
-    except Exception:
-        LOG.exception(
-            "No se pudo enviar el mensaje con botones nativos; usando send_message"
+    except Exception as exc:
+        LOG.warning(
+            "No se pudieron enviar botones de copia (%s); enviando enlaces sin botones",
+            exc,
         )
         await client.send_message(
-            chat_id=message.chat.id,
-            text=response_text,
-            parse_mode=ParseMode.HTML,
-            reply_to_message_id=message.id,
+            event.chat_id,
+            response_text,
+            parse_mode="html",
+            reply_to=event.id,
         )
+
+
+async def resolve_bin_channel(client: TelegramClient, channel_id: int):
+    async for dialog in client.iter_dialogs(limit=None):
+        if dialog.id == channel_id:
+            return dialog.entity
+    raise RuntimeError(
+        "BIN_CHANNEL no aparece en los dialogos accesibles; confirma que el bot "
+        "esta agregado al canal y que BIN_CHANNEL es correcto"
+    )
 
 
 async def main() -> None:
@@ -316,29 +321,18 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     settings = Settings.from_env()
-    SESSION_STRING = os.environ.get("SESSION_STRING", "").strip() or None
-    client = Client(
-        "file_to_link_bot",
-        api_id=settings.api_id,
-        api_hash=settings.api_hash,
-        bot_token=settings.bot_token,
-        session_string=SESSION_STRING,
-        in_memory=SESSION_STRING is not None,
-    )
+    session_string = os.environ.get("SESSION_STRING", "").strip()
+    session = StringSession(session_string) if session_string else "file_to_link_bot"
+    client = TelegramClient(session, settings.api_id, settings.api_hash)
     worker_mode = os.environ.get("WORKER_MODE", "false").lower() == "true"
 
     if worker_mode:
         LOG.info("WORKER_MODE activo: manejadores de mensajes deshabilitados")
     else:
-        async def on_upload(bot: Client, message) -> None:
-            await handle_upload(bot, message, settings)
 
-        client.add_handler(
-            MessageHandler(
-                on_upload,
-                (filters.private | filters.group) & (filters.video | filters.document),
-            )
-        )
+        @client.on(events.NewMessage(incoming=True))
+        async def on_upload(event) -> None:
+            await handle_upload(client, event, settings)
 
     web_app = web.Application()
     web_app["telegram_client"] = client
@@ -348,20 +342,18 @@ async def main() -> None:
     web_app.router.add_get("/dl/{message_id}", serve_file, name="download")
 
     runner = web.AppRunner(web_app)
-    telegram_started = False
     try:
         await runner.setup()
         site = web.TCPSite(runner, host="0.0.0.0", port=settings.port)
         await site.start()
-        LOG.info("Bot y servidor HTTP activos en el puerto %s", settings.port)
+        LOG.info("Servidor HTTP activo en el puerto %s", settings.port)
 
         for attempt in range(1, 11):
             try:
-                await client.start()
-                telegram_started = True
+                await client.start(bot_token=settings.bot_token)
                 LOG.info("Cliente de Telegram iniciado en el intento %s", attempt)
                 break
-            except RpcCallFail as exc:
+            except RpcCallFailError as exc:
                 if attempt == 10:
                     LOG.exception(
                         "No se pudo iniciar Telegram despues de 10 intentos"
@@ -374,6 +366,11 @@ async def main() -> None:
                 )
                 await asyncio.sleep(10)
 
+        web_app["bin_channel"] = await resolve_bin_channel(
+            client,
+            settings.bin_channel,
+        )
+
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         for stop_signal in (signal.SIGINT, signal.SIGTERM):
@@ -381,8 +378,8 @@ async def main() -> None:
         await stop_event.wait()
     finally:
         await runner.cleanup()
-        if telegram_started:
-            await client.stop()
+        if client.is_connected():
+            await client.disconnect()
 
 
 if __name__ == "__main__":
