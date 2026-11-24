@@ -316,11 +316,14 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     settings = Settings.from_env()
+    SESSION_STRING = os.environ.get("SESSION_STRING", "").strip() or None
     client = Client(
         "file_to_link_bot",
         api_id=settings.api_id,
         api_hash=settings.api_hash,
         bot_token=settings.bot_token,
+        session_string=SESSION_STRING,
+        in_memory=SESSION_STRING is not None,
     )
     worker_mode = os.environ.get("WORKER_MODE", "false").lower() == "true"
 
