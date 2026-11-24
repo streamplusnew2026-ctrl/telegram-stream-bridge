@@ -306,13 +306,29 @@ async def handle_upload(client: TelegramClient, event, settings: Settings) -> No
 
 
 async def resolve_bin_channel(client: TelegramClient, channel_id: int):
-    async for dialog in client.iter_dialogs(limit=None):
-        if dialog.id == channel_id:
-            return dialog.entity
-    raise RuntimeError(
-        "BIN_CHANNEL no aparece en los dialogos accesibles; confirma que el bot "
-        "esta agregado al canal y que BIN_CHANNEL es correcto"
-    )
+    try:
+        return await client.get_input_entity(int(channel_id))
+    except ValueError as cache_error:
+        resolved_id, peer_type = utils.resolve_id(int(channel_id))
+        if peer_type is not types.PeerChannel:
+            raise RuntimeError(
+                f"BIN_CHANNEL={channel_id} no es un ID de canal valido"
+            ) from cache_error
+
+        try:
+            peer = types.PeerChannel(resolved_id)
+            return await client.get_input_entity(peer)
+        except ValueError:
+            try:
+                return await client.get_input_entity(
+                    await client.get_entity(int(channel_id))
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "No se pudo resolver BIN_CHANNEL sin una entidad en la cache. "
+                    "Confirma que el bot tiene acceso al canal y que su entidad "
+                    "ya esta disponible en la sesion de Telethon."
+                ) from exc
 
 
 async def main() -> None:
