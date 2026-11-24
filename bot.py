@@ -102,19 +102,45 @@ def normalize_public_url(value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
-def get_file(message, fallback_name: str = "Archivo sin nombre"):
+def extract_media_name(message) -> str:
+    file_name = getattr(getattr(message, "file", None), "name", None)
+    if file_name and file_name.strip():
+        return file_name.strip()
+
+    document = getattr(message, "document", None)
+    if document is not None:
+        for attribute in document.attributes or ():
+            if (
+                isinstance(attribute, types.DocumentAttributeFilename)
+                and attribute.file_name
+                and attribute.file_name.strip()
+            ):
+                return attribute.file_name.strip()
+
+    raw_text = getattr(message, "raw_text", None) or ""
+    for line in raw_text.splitlines():
+        line = re.sub(r"<[^>]*>", "", line)
+        line = re.sub(
+            r"\[([^\]]+)\]\((?:https?://|www\.|t\.me/)[^)]*\)",
+            r"\1",
+            line,
+        )
+        line = re.sub(r"(?:https?://|www\.|t\.me/)\S+", "", line)
+        line = html.unescape(line).strip(" \t-–—|•·,;")
+        if line:
+            return line[:100]
+
+    if getattr(message, "video", None):
+        return "Video_Telegram.mp4"
+    return "Archivo_sin_nombre"
+
+
+def get_file(message):
     document = getattr(message, "document", None)
     if document is None:
         return None
 
-    filename = next(
-        (
-            attribute.file_name
-            for attribute in document.attributes
-            if isinstance(attribute, types.DocumentAttributeFilename)
-        ),
-        fallback_name,
-    )
+    filename = extract_media_name(message)
     mime_type = document.mime_type or mimetypes.guess_type(filename)[0]
     return document, filename, mime_type or "application/octet-stream"
 
@@ -171,7 +197,7 @@ async def serve_file(request: web.Request) -> web.StreamResponse:
     if not message or not message.id:
         raise web.HTTPNotFound(text="Archivo no encontrado")
 
-    file_info = get_file(message, f"file_{message_id}")
+    file_info = get_file(message)
     if file_info is None:
         raise web.HTTPNotFound(text="El mensaje no contiene un video o documento")
     document, filename, mime_type = file_info
@@ -278,7 +304,7 @@ async def handle_upload(client: TelegramClient, event, settings: Settings) -> No
     file_info = get_file(event.message)
     if file_info is None:
         return
-    _, filename, _ = file_info
+    filename = extract_media_name(event.message)
 
     try:
         stored_message = await client.forward_messages(
