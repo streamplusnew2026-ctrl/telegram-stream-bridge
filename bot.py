@@ -6,17 +6,39 @@ import mimetypes
 import os
 import re
 import signal
+import struct
 from dataclasses import dataclass
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from aiohttp import web
-from telethon import Button, TelegramClient, events, types
+from telethon import TelegramClient, events, types
 from telethon.errors import RpcCallFailError
 from telethon.sessions import StringSession
+from telethon.tl.types import KeyboardInlineButtonRow, ReplyInlineMarkup
+from telethon.tl.tlobject import TLObject
 
 CHUNK_SIZE = 1024 * 1024
 RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)$")
 LOG = logging.getLogger("file_to_link")
+
+
+try:
+    from telethon.tl.types import KeyboardButtonCopy
+except ImportError:
+    # Telethon 1.46 lacks this Telegram TL constructor.
+    class KeyboardButtonCopy(TLObject):
+        CONSTRUCTOR_ID = 0x75D2698E
+
+        def __init__(self, text: str, copy_text: str):
+            self.text = text
+            self.copy_text = copy_text
+
+        def _bytes(self) -> bytes:
+            return (
+                struct.pack("<I", self.CONSTRUCTOR_ID)
+                + self.serialize_bytes(self.text)
+                + self.serialize_bytes(self.copy_text)
+            )
 
 
 @dataclass(frozen=True)
@@ -281,15 +303,27 @@ async def handle_upload(client: TelegramClient, event, settings: Settings) -> No
     )
 
     try:
-        buttons = [[
-            Button.copy("📋 Copiar Streaming", stream_url),
-            Button.copy("📋 Copiar Descarga", download_url),
-        ]]
+        reply_markup = ReplyInlineMarkup(
+            rows=[
+                KeyboardInlineButtonRow(
+                    [
+                        KeyboardButtonCopy(
+                            text="📋 Copiar Streaming",
+                            copy_text=stream_url,
+                        ),
+                        KeyboardButtonCopy(
+                            text="📋 Copiar Descarga",
+                            copy_text=download_url,
+                        ),
+                    ]
+                )
+            ]
+        )
         await client.send_message(
             event.chat_id,
             response_text,
             parse_mode="html",
-            buttons=buttons,
+            buttons=reply_markup,
             reply_to=event.id,
         )
     except Exception as exc:
